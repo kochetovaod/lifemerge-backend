@@ -3,20 +3,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
 from app.core.response import err, ok
 from app.db.session import get_db
-from app.schemas.auth import (
-    AuthOut,
-    ForgotIn,
-    LoginIn,
-    LogoutIn,
-    RefreshIn,
-    ResetIn,
-    SignupIn,
-)
+from app.middleware.rate_limit import forgot_rate_limit, signup_rate_limit
+from app.schemas.auth import AuthOut, ForgotIn, LoginIn, LogoutIn, RefreshIn, ResetIn, SignupIn
 from app.schemas.user import UserOut
 from app.services.auth_service import (
+    RefreshError,
     authenticate_user,
     create_user,
     get_user_by_email,
@@ -24,11 +17,13 @@ from app.services.auth_service import (
     refresh_tokens,
     revoke_device_tokens,
 )
+from app.services.events import publish_event
+from app.api.deps import get_current_user
 
 router = APIRouter(prefix="/auth")
 
 
-@router.post("/signup", response_model=AuthOut)
+@router.post("/signup", response_model=AuthOut, dependencies=[signup_rate_limit])
 async def signup(
     request: Request,
     body: SignupIn,
@@ -43,6 +38,13 @@ async def signup(
     device_id = x_device_id or "default"
     access, refresh = await issue_tokens(db, user, device_id)
     await db.commit()
+
+    publish_event(
+        name="User_SignUp",
+        request_id=request.state.request_id,
+        user_id=str(user.id),
+        payload={"device_id": device_id},
+    )
 
     return ok(
         request,
@@ -75,11 +77,10 @@ async def login(request: Request, body: LoginIn, db: AsyncSession = Depends(get_
 
 @router.post("/refresh", response_model=AuthOut)
 async def refresh(request: Request, body: RefreshIn, db: AsyncSession = Depends(get_db)):
-    res = await refresh_tokens(db, body.refresh_token, body.device_id)
-    if not res:
-        raise HTTPException(status_code=401, detail=err(request, "invalid_refresh", "Invalid refresh token"))
-
-    user, access, refresh = res
+    try:
+        user, access, refresh_token = await refresh_tokens(db, body.refresh_token, body.device_id)
+    except RefreshError as e:
+        raise HTTPException(status_code=401, detail=err(request, e.code, "Invalid refresh token"))
     await db.commit()
 
     return ok(
@@ -87,20 +88,18 @@ async def refresh(request: Request, body: RefreshIn, db: AsyncSession = Depends(
         {
             "user": UserOut.model_validate(user),
             "access_token": access,
-            "refresh_token": refresh,
+            "refresh_token": refresh_token,
         },
     )
 
 
-@router.post("/forgot")
+@router.post("/forgot", dependencies=[forgot_rate_limit])
 async def forgot(request: Request, body: ForgotIn):
-    # Stub: production will enqueue email sending and return 200 regardless
     return ok(request, {"status": "ok"})
 
 
 @router.post("/reset")
 async def reset(request: Request, body: ResetIn):
-    # Stub: production will validate reset token and update password
     return ok(request, {"status": "ok"})
 
 

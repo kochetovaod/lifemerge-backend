@@ -12,13 +12,8 @@ from app.api.idempotency import enforce_idempotency
 from app.core.response import err, ok
 from app.db.session import get_db
 from app.models.task import Task
-from app.schemas.tasks import (
-    TaskCreateIn,
-    TaskDeleteIn,
-    TaskListOut,
-    TaskOut,
-    TaskUpdateIn,
-)
+from app.schemas.tasks import TaskCreateIn, TaskDeleteIn, TaskListOut, TaskOut, TaskUpdateIn
+from app.services.events import publish_event
 from app.services.tasks_service import create_task, list_tasks, soft_delete_task, update_task
 
 router = APIRouter(prefix="/tasks")
@@ -69,6 +64,14 @@ async def post_task(
     task = await create_task(db, current_user.id, body.model_dump())
     await db.commit()
     await db.refresh(task)
+
+    publish_event(
+        name="Task_Created",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        payload={"task_id": str(task.id)},
+    )
+
     return ok(request, TaskOut.model_validate(task).model_dump())
 
 
@@ -83,9 +86,7 @@ async def patch_task(
 ):
     await enforce_idempotency(request, current_user, db, request_id=body.request_id, idempotency_key=x_idempotency_key)
 
-    res = await db.execute(
-        select(Task).where(Task.id == task_id, Task.user_id == current_user.id, Task.deleted == False)  # noqa: E712
-    )
+    res = await db.execute(select(Task).where(Task.id == task_id, Task.user_id == current_user.id, Task.deleted == False))  # noqa: E712
     task = res.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail=err(request, "not_found", "Task not found"))
@@ -93,7 +94,6 @@ async def patch_task(
     try:
         updated = await update_task(db, task, body.model_dump(exclude_unset=True), expected_updated_at=body.updated_at)
     except ValueError:
-        # optimistic-lock conflict
         raise HTTPException(
             status_code=409,
             detail=err(
@@ -120,9 +120,7 @@ async def delete_task(
 ):
     await enforce_idempotency(request, current_user, db, request_id=body.request_id, idempotency_key=x_idempotency_key)
 
-    res = await db.execute(
-        select(Task).where(Task.id == task_id, Task.user_id == current_user.id, Task.deleted == False)  # noqa: E712
-    )
+    res = await db.execute(select(Task).where(Task.id == task_id, Task.user_id == current_user.id, Task.deleted == False))  # noqa: E712
     task = res.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail=err(request, "not_found", "Task not found"))
