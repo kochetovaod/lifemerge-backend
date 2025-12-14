@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.task import Task
 from app.repositories import tasks_repo
+from app.schemas.tasks import ALLOWED_STATUSES
 
 
 async def list_tasks(
@@ -59,6 +60,9 @@ async def update_task(db: AsyncSession, task: Task, patch: dict, expected_update
             raise ValueError("conflict")
 
     values = {k: v for k, v in patch.items() if v is not None and k not in {"request_id", "updated_at"}}
+    status = values.get("status")
+    if status and status not in ALLOWED_STATUSES:
+        raise ValueError("invalid_status")
     values["updated_at"] = datetime.now(timezone.utc)
 
     await tasks_repo.patch(db, task_id=task.id, values=values)
