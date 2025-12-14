@@ -9,10 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.api.idempotency import enforce_idempotency
+from app.core.logging import log
 from app.core.response import err, ok
 from app.db.session import get_db
 from app.models.task import Task
-from app.schemas.tasks import TaskCreateIn, TaskDeleteIn, TaskListOut, TaskOut, TaskUpdateIn
+from app.schemas.tasks import ALLOWED_STATUSES, TaskCreateIn, TaskDeleteIn, TaskListOut, TaskOut, TaskUpdateIn
 from app.services.events import publish_event
 from app.services.tasks_service import create_task, list_tasks, soft_delete_task, update_task
 
@@ -31,6 +32,9 @@ async def get_tasks(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
 ):
+    if status and status not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail=err(request, "validation_error", "Unsupported status filter"))
+
     items, next_cursor = await list_tasks(
         db,
         user_id=current_user.id,
@@ -42,13 +46,20 @@ async def get_tasks(
         limit=limit,
     )
 
-    return ok(
-        request,
-        {
-            "items": [TaskOut.model_validate(t) for t in items],
-            "next_cursor": next_cursor,
-        },
+    payload = {
+        "items": [TaskOut.model_validate(t) for t in items],
+        "next_cursor": next_cursor,
+    }
+
+    log.info(
+        "tasks_list",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        count=len(items),
+        next_cursor=next_cursor,
     )
+
+    return ok(request, payload)
 
 
 @router.post("", response_model=TaskOut)
@@ -72,6 +83,13 @@ async def post_task(
         payload={"task_id": str(task.id)},
     )
 
+    log.info(
+        "task_created",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        task_id=str(task.id),
+    )
+
     return ok(request, TaskOut.model_validate(task).model_dump())
 
 
@@ -93,19 +111,27 @@ async def patch_task(
 
     try:
         updated = await update_task(db, task, body.model_dump(exclude_unset=True), expected_updated_at=body.updated_at)
-    except ValueError:
-        raise HTTPException(
-            status_code=409,
-            detail=err(
-                request,
-                "conflict",
-                "Task version conflict",
-                details={"current": TaskOut.model_validate(task).model_dump()},
-            ),
-        )
+    except ValueError as exc:
+        if str(exc) == "conflict":
+            raise HTTPException(
+                status_code=409,
+                detail=err(
+                    request,
+                    "conflict",
+                    "Task version conflict",
+                    details={"current": TaskOut.model_validate(task).model_dump()},
+                ),
+            )
+        raise HTTPException(status_code=400, detail=err(request, "validation_error", "Invalid task data"))
 
     await db.commit()
     await db.refresh(updated)
+    log.info(
+        "task_updated",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        task_id=str(updated.id),
+    )
     return ok(request, TaskOut.model_validate(updated).model_dump())
 
 
@@ -127,4 +153,10 @@ async def delete_task(
 
     await soft_delete_task(db, task)
     await db.commit()
+    log.info(
+        "task_deleted",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        task_id=str(task.id),
+    )
     return ok(request, {"status": "ok"})

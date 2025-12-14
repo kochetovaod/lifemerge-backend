@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.schemas.user import UserOut
 
@@ -11,6 +13,15 @@ class SignupIn(BaseModel):
     full_name: str | None = Field(default=None, max_length=200)
     timezone: str = Field(default="UTC", max_length=64)
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except Exception as exc:  # pragma: no cover - defensive validation
+            raise ValueError("Invalid timezone") from exc
+        return value
+
 
 class LoginIn(BaseModel):
     email: EmailStr
@@ -19,8 +30,8 @@ class LoginIn(BaseModel):
 
 
 class RefreshIn(BaseModel):
-    refresh_token: str
-    device_id: str
+    refresh_token: str = Field(min_length=1)
+    device_id: str = Field(min_length=1, max_length=128)
 
 
 class ForgotIn(BaseModel):
@@ -33,7 +44,7 @@ class ResetIn(BaseModel):
 
 
 class LogoutIn(BaseModel):
-    device_id: str
+    device_id: str = Field(min_length=1, max_length=128)
 
 
 class AuthOut(BaseModel):

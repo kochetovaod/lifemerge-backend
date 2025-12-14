@@ -1,14 +1,16 @@
-"""init
+"""Initial tables for users, tasks, refresh tokens, idempotency keys.
 
 Revision ID: 0001_init
-Revises:
+Revises: 
 Create Date: 2025-12-14
 """
+
 from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
 
 revision = "0001_init"
 down_revision = None

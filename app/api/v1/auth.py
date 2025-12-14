@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.response import err, ok
+from app.core.logging import log
 from app.db.session import get_db
 from app.middleware.rate_limit import forgot_rate_limit, signup_rate_limit
 from app.schemas.auth import AuthOut, ForgotIn, LoginIn, LogoutIn, RefreshIn, ResetIn, SignupIn
@@ -34,16 +36,28 @@ async def signup(
     if existing:
         raise HTTPException(status_code=409, detail=err(request, "user_exists", "User already exists"))
 
-    user = await create_user(db, body.email, body.password, body.full_name, body.timezone)
-    device_id = x_device_id or "default"
-    access, refresh = await issue_tokens(db, user, device_id)
-    await db.commit()
+    try:
+        user = await create_user(db, body.email, body.password, body.full_name, body.timezone)
+        device_id = x_device_id or "default"
+        access, refresh = await issue_tokens(db, user, device_id)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=err(request, "user_exists", "User already exists"))
 
     publish_event(
         name="User_SignUp",
         request_id=request.state.request_id,
         user_id=str(user.id),
         payload={"device_id": device_id},
+    )
+
+    log.info(
+        "auth_signup",
+        request_id=request.state.request_id,
+        user_id=str(user.id),
+        device_id=device_id,
+        timezone=user.timezone,
     )
 
     return ok(
@@ -65,6 +79,13 @@ async def login(request: Request, body: LoginIn, db: AsyncSession = Depends(get_
     access, refresh = await issue_tokens(db, user, body.device_id)
     await db.commit()
 
+    log.info(
+        "auth_login",
+        request_id=request.state.request_id,
+        user_id=str(user.id),
+        device_id=body.device_id,
+    )
+
     return ok(
         request,
         {
@@ -82,6 +103,13 @@ async def refresh(request: Request, body: RefreshIn, db: AsyncSession = Depends(
     except RefreshError as e:
         raise HTTPException(status_code=401, detail=err(request, e.code, "Invalid refresh token"))
     await db.commit()
+
+    log.info(
+        "auth_refresh",
+        request_id=request.state.request_id,
+        user_id=str(user.id),
+        device_id=body.device_id,
+    )
 
     return ok(
         request,
@@ -112,4 +140,10 @@ async def logout(
 ):
     await revoke_device_tokens(db, current_user, body.device_id)
     await db.commit()
+    log.info(
+        "auth_logout",
+        request_id=request.state.request_id,
+        user_id=str(current_user.id),
+        device_id=body.device_id,
+    )
     return ok(request, {"status": "ok"})
